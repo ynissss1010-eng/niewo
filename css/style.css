@@ -1362,4 +1362,164 @@ dialog::backdrop {
   background: #efd0df;
   color: var(--ink);
 }
+/* 電腦版隱藏手機日期工具列 */
+.mobile-date-panel {
+  display: none;
+}
 
+/* =========================
+   手機首頁：日期工具列＋當日內容
+========================= */
+
+@media (max-width: 780px) {
+  body[data-page="home"] .workspace {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding-top: 20px;
+  }
+
+  /*
+   讓日期工具列、月曆和內容依序排列。
+   桌面版不受此規則影響。
+  */
+  body[data-page="home"] main {
+    display: contents;
+  }
+
+  body[data-page="home"] .sidebar {
+    display: none;
+    width: 100%;
+    order: 2;
+    margin-bottom: 20px;
+  }
+
+  /* 手機不重複顯示左側的大標題與介紹 */
+  body[data-page="home"] .sidebar > .eyebrow,
+  body[data-page="home"] .sidebar > h1,
+  body[data-page="home"] .sidebar > .sidebar-intro,
+  body[data-page="home"] .sidebar > .side-summary,
+  body[data-page="home"] .sidebar > .side-note {
+    display: none;
+  }
+
+  /* 按下展開後，才顯示完整月曆 */
+  body[data-page="home"].mobile-calendar-open .sidebar {
+    display: block;
+  }
+
+  body[data-page="home"] .home-calendar {
+    width: 100%;
+  }
+
+  body[data-page="home"] .home-calendar .panel {
+    margin: 0;
+  }
+
+  /* 日期工具列固定排在內容最上方 */
+  body[data-page="home"] .mobile-date-panel {
+    display: block;
+    order: 1;
+    width: 100%;
+    margin-bottom: 20px;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+
+  .mobile-date-navigation {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .mobile-day-arrow {
+    width: 44px;
+    min-height: 44px;
+    padding: 0;
+    font-size: 24px;
+  }
+
+  .mobile-date-label {
+    min-width: 0;
+    text-align: center;
+  }
+
+  .mobile-date-label span {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--muted);
+    font-size: 12px;
+  }
+
+  .mobile-date-label strong {
+    display: block;
+    color: var(--ink);
+    font-size: 17px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+  }
+
+  .mobile-date-actions {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
+
+  .mobile-date-actions .btn {
+    min-height: 44px;
+    padding-inline: 16px;
+  }
+
+  .mobile-calendar-toggle {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-color: var(--line);
+  }
+
+  /* 主要內容排在日期選擇之後 */
+  body[data-page="home"] main > .page-heading {
+    order: 3;
+    width: 100%;
+    margin-bottom: 18px;
+    align-items: center;
+  }
+
+  body[data-page="home"] main > .panel {
+    order: 4;
+    width: 100%;
+    margin-bottom: 18px;
+  }
+
+  /* 工具列已交代操作方式，手機減少重複說明 */
+  body[data-page="home"] .page-heading .eyebrow,
+  body[data-page="home"] .page-heading > div > p:not(.eyebrow) {
+    display: none;
+  }
+
+  body[data-page="home"] .page-heading h2 {
+    margin: 0;
+    font-size: 21px;
+  }
+
+  body[data-page="home"] .page-heading > .btn {
+    min-height: 44px;
+  }
+
+  /* 觸控操作至少保留舒適高度 */
+  body[data-page="home"] .day {
+    min-height: 58px;
+  }
+
+  body[data-page="home"] .entry .text-button,
+  body[data-page="home"] .photo-card .text-button {
+    min-height: 44px;
+  }
+}

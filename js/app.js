@@ -49,11 +49,7 @@ const PRODUCTS = [
   { id: "sticker", name: "日程貼紙", price: 18 }
 ];
 
-/*
-  香港 2026 年公眾假期。
-  其他年份會顯示固定日期節日，並在介面說明資料範圍。
-  如需擴充年份，可在此加入 YYYY-MM-DD 對應名稱。
-*/
+/* 香港 2026 年公眾假期 */
 const HOLIDAYS = {
   "2026-01-01": "元旦",
   "2026-02-17": "農曆年初一",
@@ -74,6 +70,7 @@ const HOLIDAYS = {
   "2026-12-26": "聖誕節後第一個周日"
 };
 
+/* 其他年份僅顯示以下固定日期節日 */
 const FIXED_FESTIVALS = {
   "01-01": "元旦",
   "05-01": "勞動節",
@@ -86,6 +83,7 @@ function dateKey(date = new Date()) {
   const year = date.getFullYear();
   const month = String(date.getMonth() + 1).padStart(2, "0");
   const day = String(date.getDate()).padStart(2, "0");
+
   return `${year}-${month}-${day}`;
 }
 
@@ -105,6 +103,7 @@ function readableDate(value) {
 function holidayName(value) {
   if (HOLIDAYS[value]) return HOLIDAYS[value];
   if (value.startsWith("2026-")) return "";
+
   return FIXED_FESTIVALS[value.slice(5)] || "";
 }
 
@@ -119,8 +118,8 @@ function escapeHTML(value = "") {
 }
 
 function uid() {
-  return crypto.randomUUID
-    ? crypto.randomUUID()
+  return globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID()
     : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
@@ -136,6 +135,12 @@ function validDate(value) {
     && dateKey(parseDate(value)) === value;
 }
 
+function cloneData(value) {
+  return typeof structuredClone === "function"
+    ? structuredClone(value)
+    : JSON.parse(JSON.stringify(value));
+}
+
 const todayKey = () => dateKey();
 
 let selectedDate = todayKey();
@@ -147,6 +152,7 @@ let shownMonth = new Date(
 
 let taskFilter = "all";
 let taskSearch = "";
+let mobileCalendarOpen = false;
 let db;
 let data;
 let saving = false;
@@ -181,18 +187,58 @@ function initialData() {
   };
 }
 
+function normalizeData(saved) {
+  const defaults = initialData();
+
+  if (!saved || typeof saved !== "object") {
+    return defaults;
+  }
+
+  return {
+    ...defaults,
+    ...saved,
+    profile: {
+      ...defaults.profile,
+      ...saved.profile
+    },
+    preferences: {
+      ...defaults.preferences,
+      ...saved.preferences
+    },
+    events: Array.isArray(saved.events) ? saved.events : [],
+    tasks: Array.isArray(saved.tasks) ? saved.tasks : [],
+    photos: saved.photos && typeof saved.photos === "object"
+      ? saved.photos
+      : {},
+    budget: {
+      ...defaults.budget,
+      ...saved.budget,
+      rows: Array.isArray(saved.budget?.rows)
+        ? saved.budget.rows
+        : defaults.budget.rows
+    }
+  };
+}
+
 function openDatabase() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open("dayline-database", 1);
 
     request.onupgradeneeded = () => {
-      request.result.createObjectStore("storage");
+      const database = request.result;
+
+      if (!database.objectStoreNames.contains("storage")) {
+        database.createObjectStore("storage");
+      }
     };
 
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error);
+
     request.onblocked = () => {
-      reject(new Error("資料庫更新被其他分頁阻擋，請關閉其他日序分頁後重試。"));
+      reject(
+        new Error("請關閉其他日序分頁，再重新載入網站。")
+      );
     };
   });
 }
@@ -210,10 +256,12 @@ function readData() {
 function writeData() {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction("storage", "readwrite");
+
     transaction.objectStore("storage").put(data, "data");
 
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
+
     transaction.onabort = () => {
       reject(transaction.error || new Error("儲存已中止"));
     };
@@ -227,28 +275,44 @@ async function updateData(change, message = "已儲存") {
   }
 
   saving = true;
-  const previous = structuredClone(data);
+  let previous;
 
   try {
+    previous = cloneData(data);
     change();
     await writeData();
-    render();
-    if (message) toast(message);
-    return true;
   } catch (error) {
-    data = previous;
+    if (previous) data = previous;
+
     console.error(error);
     toast("儲存失敗，請檢查瀏覽器儲存空間後重試。");
     return false;
   } finally {
     saving = false;
   }
+
+  try {
+    render();
+  } catch (error) {
+    console.error(error);
+    toast("資料已儲存，但畫面更新失敗，請重新整理。");
+    return true;
+  }
+
+  if (message) toast(message);
+  return true;
 }
 
 function toast(message) {
+  if (!toastElement) {
+    console.log(message);
+    return;
+  }
+
   clearTimeout(toastTimer);
   toastElement.textContent = message;
   toastElement.classList.add("visible");
+
   toastTimer = setTimeout(() => {
     toastElement.classList.remove("visible");
   }, 3600);
@@ -260,18 +324,20 @@ function toast(message) {
 
 function avatarMarkup(large = false) {
   const className = `avatar${large ? " large" : ""}`;
+  const name = String(data.profile.name || "生活記錄者");
 
   if (data.profile.avatar) {
     return `
-      <img class="${className}"
-        src="${data.profile.avatar}"
-        alt="${escapeHTML(data.profile.name)}的頭像">
+      <img
+        class="${className}"
+        src="${escapeHTML(data.profile.avatar)}"
+        alt="${escapeHTML(name)}的頭像">
     `;
   }
 
   return `
     <span class="${className}" aria-label="預設頭像">
-      ${escapeHTML(Array.from(data.profile.name)[0] || "日")}
+      ${escapeHTML(Array.from(name)[0] || "日")}
     </span>
   `;
 }
@@ -288,7 +354,9 @@ function todayStats() {
     tasks: tasks.length,
     done,
     total: items.length,
-    percent: items.length ? Math.round(done / items.length * 100) : 0
+    percent: items.length
+      ? Math.round(done / items.length * 100)
+      : 0
   };
 }
 
@@ -296,7 +364,15 @@ function render() {
   const currentPage = PAGES[page] || PAGES.home;
   const stats = todayStats();
 
-  document.body.classList.toggle("compact", data.preferences.compact);
+  document.body.classList.toggle(
+    "compact",
+    Boolean(data.preferences.compact)
+  );
+
+  document.body.classList.toggle(
+    "mobile-calendar-open",
+    page === "home" && mobileCalendarOpen
+  );
 
   app.innerHTML = `
     <a class="skip-link" href="#main">跳到主要內容</a>
@@ -313,14 +389,17 @@ function render() {
 
         <nav class="navigation" aria-label="主要導航">
           ${Object.entries(PAGES).map(([key, item]) => `
-            <a href="${item.href}"
+            <a
+              href="${item.href}"
               ${key === page ? 'aria-current="page"' : ""}>
               ${item.label}
             </a>
           `).join("")}
         </nav>
 
-        <a class="header-profile" href="profile.html"
+        <a
+          class="header-profile"
+          href="profile.html"
           aria-label="前往個人主頁">
           ${avatarMarkup()}
           <span>${escapeHTML(data.profile.name)}</span>
@@ -329,27 +408,47 @@ function render() {
     </header>
 
     <div class="workspace">
-      <aside class="sidebar" aria-label="今日摘要">
+      <aside class="sidebar" aria-label="日期選擇與今日摘要">
         <p class="eyebrow">A LITTLE ORDER, A LITTLE JOY</p>
         <h1>${currentPage.title}</h1>
         <p class="sidebar-intro">${currentPage.description}</p>
-        ${page === "home" ? calendarMarkup() : ""}
+
+        ${page === "home" ? `
+          <div id="home-calendar" class="home-calendar">
+            ${calendarMarkup()}
+          </div>
+        ` : ""}
+
         <section class="side-summary">
           <span class="muted">今天的生活節奏</span>
           <p class="side-date">${readableDate(todayKey())}</p>
 
           <div class="stats">
-            <div><strong>${stats.events}</strong><span>今日行程</span></div>
-            <div><strong>${stats.tasks}</strong><span>今日待辦</span></div>
-            <div><strong>${stats.done}</strong><span>已經完成</span></div>
+            <div>
+              <strong>${stats.events}</strong>
+              <span>今日行程</span>
+            </div>
+            <div>
+              <strong>${stats.tasks}</strong>
+              <span>今日待辦</span>
+            </div>
+            <div>
+              <strong>${stats.done}</strong>
+              <span>已經完成</span>
+            </div>
           </div>
 
-          <div class="progress-track" role="progressbar"
+          <div
+            class="progress-track"
+            role="progressbar"
             aria-label="今日完成進度"
-            aria-valuemin="0" aria-valuemax="100"
+            aria-valuemin="0"
+            aria-valuemax="100"
             aria-valuenow="${stats.percent}">
-            <div class="progress-fill"
-              style="width:${stats.percent}%"></div>
+            <div
+              class="progress-fill"
+              style="width:${stats.percent}%">
+            </div>
           </div>
 
           <small>
@@ -374,12 +473,73 @@ function render() {
       日序 Dayline · 資料儲存於目前瀏覽器 · VIT2621 Mini Project
     </footer>
 
-    <dialog id="entry-dialog" aria-labelledby="dialog-title"></dialog>
+    <dialog
+      id="entry-dialog"
+      aria-labelledby="dialog-title">
+    </dialog>
   `;
 
   app.setAttribute("aria-busy", "false");
 
-  if (page === "settings") updateBudgetPreview();
+  if (page === "settings") {
+    updateBudgetPreview();
+  }
+}
+
+/* 手機首頁日期工具列 */
+function mobileDateControls() {
+  const previous = parseDate(selectedDate);
+  previous.setDate(previous.getDate() - 1);
+
+  const next = parseDate(selectedDate);
+  next.setDate(next.getDate() + 1);
+
+  return `
+    <section class="mobile-date-panel" aria-label="日期切換">
+      <div class="mobile-date-navigation">
+        <button
+          type="button"
+          class="btn mobile-day-arrow"
+          data-action="select-date"
+          data-date="${dateKey(previous)}"
+          aria-label="查看前一天">
+          ‹
+        </button>
+
+        <div class="mobile-date-label">
+          <span>${selectedDate.slice(0, 4)} 年</span>
+          <strong>${readableDate(selectedDate)}</strong>
+        </div>
+
+        <button
+          type="button"
+          class="btn mobile-day-arrow"
+          data-action="select-date"
+          data-date="${dateKey(next)}"
+          aria-label="查看後一天">
+          ›
+        </button>
+      </div>
+
+      <div class="mobile-date-actions">
+        <button
+          type="button"
+          class="btn small"
+          data-action="calendar-today">
+          回到今天
+        </button>
+
+        <button
+          type="button"
+          class="btn small mobile-calendar-toggle"
+          data-action="toggle-mobile-calendar"
+          aria-expanded="${mobileCalendarOpen}"
+          aria-controls="home-calendar">
+          ${mobileCalendarOpen ? "收起月曆" : "展開月曆"}
+        </button>
+      </div>
+    </section>
+  `;
 }
 
 function renderPage() {
@@ -391,9 +551,15 @@ function renderPage() {
             <h2>今日計劃</h2>
             <p>${readableDate(todayKey())}，一步一步完成就好。</p>
           </div>
-          <button class="btn primary" data-action="new-event"
-            data-date="${todayKey()}">＋ 新增行程</button>
+
+          <button
+            class="btn primary"
+            data-action="new-event"
+            data-date="${todayKey()}">
+            ＋ 新增行程
+          </button>
         </div>
+
         ${dayDetails(todayKey(), true)}
       `;
 
@@ -406,13 +572,15 @@ function renderPage() {
     case "profile":
       return profilePage();
 
-        default:
+    default:
       return `
+        ${mobileDateControls()}
+
         <div class="page-heading">
           <div>
             <p class="eyebrow">YOUR DAILY SPACE</p>
             <h2>這一天的安排</h2>
-            <p>從左側月曆選擇日期，整理計劃與生活記錄。</p>
+            <p>選擇日期，整理計劃與生活記錄。</p>
           </div>
 
           <button
@@ -428,7 +596,6 @@ function renderPage() {
   }
 }
 
-
 /* =========================
    4. 月曆與每日內容
 ========================= */
@@ -437,8 +604,8 @@ function calendarMarkup() {
   const year = shownMonth.getFullYear();
   const month = shownMonth.getMonth();
   const firstDay = new Date(year, month, 1);
-
   const mondayFirst = data.preferences.mondayFirst;
+
   const offset = mondayFirst
     ? (firstDay.getDay() + 6) % 7
     : firstDay.getDay();
@@ -453,9 +620,16 @@ function calendarMarkup() {
     const date = new Date(year, month, 1 - offset + index);
     const key = dateKey(date);
     const holiday = holidayName(key);
-    const eventCount = data.events.filter(item => item.date === key).length;
+
+    const eventCount = data.events.filter(
+      item => item.date === key
+    ).length;
+
+    const taskCount = data.tasks.filter(
+      item => item.date === key
+    ).length;
+
     const photoCount = (data.photos[key] || []).length;
-    const taskCount = data.tasks.filter(item => item.date === key).length;
 
     const classes = [
       "day",
@@ -467,6 +641,7 @@ function calendarMarkup() {
     ].filter(Boolean).join(" ");
 
     const label = [
+      key,
       readableDate(key),
       holiday,
       `${eventCount}項行程`,
@@ -475,20 +650,28 @@ function calendarMarkup() {
     ].filter(Boolean).join("，");
 
     days += `
-      <button type="button" class="${classes}"
-        data-action="select-date" data-date="${key}"
+      <button
+        type="button"
+        class="${classes}"
+        data-action="select-date"
+        data-date="${key}"
         aria-label="${escapeHTML(label)}"
         aria-pressed="${key === selectedDate}"
         ${holiday ? `title="${escapeHTML(holiday)}"` : ""}>
         <span class="day-number">${date.getDate()}</span>
-        ${holiday
-          ? `<span class="holiday-name">${escapeHTML(holiday)}</span>`
-          : ""}
+
+        ${holiday ? `
+          <span class="holiday-name">
+            ${escapeHTML(holiday)}
+          </span>
+        ` : ""}
+
         <span class="day-meta">
-          ${eventCount + taskCount
-            ? `<span class="event-dot" aria-hidden="true"></span>
-               <span>${eventCount + taskCount}項</span>`
-            : ""}
+          ${eventCount + taskCount ? `
+            <span class="event-dot" aria-hidden="true"></span>
+            <span>${eventCount + taskCount}項</span>
+          ` : ""}
+
           ${photoCount ? `<span>照 ${photoCount}</span>` : ""}
         </span>
       </button>
@@ -499,14 +682,25 @@ function calendarMarkup() {
     <section class="panel" aria-label="月曆">
       <div class="calendar-toolbar">
         <h2>${year} 年 ${month + 1} 月</h2>
+
         <div class="actions">
-          <button class="btn small" data-action="previous-month"
-            aria-label="上一個月">‹</button>
+          <button
+            class="btn small"
+            data-action="previous-month"
+            aria-label="上一個月">
+            ‹
+          </button>
+
           <button class="btn small" data-action="calendar-today">
             今天
           </button>
-          <button class="btn small" data-action="next-month"
-            aria-label="下一個月">›</button>
+
+          <button
+            class="btn small"
+            data-action="next-month"
+            aria-label="下一個月">
+            ›
+          </button>
         </div>
       </div>
 
@@ -517,7 +711,10 @@ function calendarMarkup() {
       <div class="calendar-grid">${days}</div>
 
       <div class="legend">
-        <span><i class="event-dot" aria-hidden="true"></i> 有安排事項</span>
+        <span>
+          <i class="event-dot" aria-hidden="true"></i>
+          有安排事項
+        </span>
         <span>「照」代表生活照片</span>
         <span>底線日期為今天</span>
       </div>
@@ -544,37 +741,60 @@ function entryMarkup(item, kind) {
 
   return `
     <article class="entry ${item.done ? "completed" : ""}">
-      <input class="entry-check" type="checkbox"
-        data-toggle="${kind}" data-id="${item.id}"
+      <input
+        class="entry-check"
+        type="checkbox"
+        data-toggle="${kind}"
+        data-id="${escapeHTML(item.id)}"
         ${item.done ? "checked" : ""}
-        aria-label="${escapeHTML(`標記「${item.title}」為${item.done ? "未完成" : "已完成"}`)}">
+        aria-label="${escapeHTML(
+          `標記「${item.title}」為${item.done ? "未完成" : "已完成"}`
+        )}">
 
-      ${kind === "event"
-        ? `<span class="entry-time">${item.time || "全天"}</span>`
-        : ""}
+      ${kind === "event" ? `
+        <span class="entry-time">
+          ${escapeHTML(item.time || "全天")}
+        </span>
+      ` : ""}
 
       <div class="entry-content">
         <p class="entry-title">${escapeHTML(item.title)}</p>
+
         <div class="entry-meta">
           <span class="tag">${escapeHTML(item.category)}</span>
-          ${kind === "task"
-            ? `<span class="${overdue ? "overdue" : ""}">
-                ${item.date}${overdue ? " · 已逾期" : ""}
-               </span>`
-            : ""}
+
+          ${kind === "task" ? `
+            <span class="${overdue ? "overdue" : ""}">
+              ${escapeHTML(item.date)}${overdue ? " · 已逾期" : ""}
+            </span>
+          ` : ""}
+
           ${item.done ? "<span>已完成</span>" : ""}
         </div>
 
-        ${item.description
-          ? `<p class="entry-description">${escapeHTML(item.description)}</p>`
-          : ""}
+        ${item.description ? `
+          <p class="entry-description">
+            ${escapeHTML(item.description)}
+          </p>
+        ` : ""}
       </div>
 
       <div class="actions">
-        <button class="text-button" data-action="edit-entry"
-          data-kind="${kind}" data-id="${item.id}">編輯</button>
-        <button class="text-button" data-action="delete-entry"
-          data-kind="${kind}" data-id="${item.id}">刪除</button>
+        <button
+          class="text-button"
+          data-action="edit-entry"
+          data-kind="${kind}"
+          data-id="${escapeHTML(item.id)}">
+          編輯
+        </button>
+
+        <button
+          class="text-button"
+          data-action="delete-entry"
+          data-kind="${kind}"
+          data-id="${escapeHTML(item.id)}">
+          刪除
+        </button>
       </div>
     </article>
   `;
@@ -590,37 +810,58 @@ function dayDetails(date, includeTasks = false) {
   );
 
   const photos = data.photos[date] || [];
+  const taskHeading = date === todayKey() ? "今日待辦" : "這一天的待辦";
 
   return `
     <section class="panel" aria-labelledby="daily-heading">
       <div class="section-heading">
         <div>
           <h3 id="daily-heading">${readableDate(date)}</h3>
-          <p>${holidayName(date) || "為今天留下一點值得期待的安排。"}</p>
+          <p>
+            ${escapeHTML(
+              holidayName(date) || "為這一天留下一點值得期待的安排。"
+            )}
+          </p>
         </div>
 
-        <button class="btn small" data-action="new-event"
-          data-date="${date}">＋ 行程</button>
+        <button
+          class="btn small"
+          data-action="new-event"
+          data-date="${date}">
+          ＋ 行程
+        </button>
       </div>
 
       ${events.length
         ? events.map(item => entryMarkup(item, "event")).join("")
-        : `<div class="empty">
+        : `
+          <div class="empty">
             <p>這一天還沒有行程。</p>
             <p>按「＋ 行程」寫下第一個安排。</p>
-           </div>`}
+          </div>
+        `}
     </section>
 
     ${includeTasks || tasks.length ? `
       <section class="panel">
         <div class="section-heading">
-          <h3>${includeTasks ? "今日待辦" : "這一天的待辦"}</h3>
-          <button class="btn small" data-action="new-task"
-            data-date="${date}">＋ 待辦</button>
+          <h3>${taskHeading}</h3>
+
+          <button
+            class="btn small"
+            data-action="new-task"
+            data-date="${date}">
+            ＋ 待辦
+          </button>
         </div>
+
         ${tasks.length
           ? tasks.map(item => entryMarkup(item, "task")).join("")
-          : `<div class="empty"><p>今天沒有待辦事項。</p></div>`}
+          : `
+            <div class="empty">
+              <p>這一天沒有待辦事項。</p>
+            </div>
+          `}
       </section>
     ` : ""}
 
@@ -632,29 +873,47 @@ function dayDetails(date, includeTasks = false) {
         </div>
 
         <label class="btn" for="daily-photos">＋ 上傳照片</label>
-        <input id="daily-photos" type="file"
+
+        <input
+          id="daily-photos"
+          type="file"
           accept="image/jpeg,image/png,image/webp"
-          multiple hidden data-upload-date="${date}">
+          multiple
+          hidden
+          data-upload-date="${date}">
       </div>
 
       ${photos.length ? `
         <div class="photo-grid">
           ${photos.map(photo => `
             <figure class="photo-card">
-              <a href="${photo.src}" target="_blank" rel="noopener"
+              <a
+                href="${escapeHTML(photo.src)}"
+                target="_blank"
+                rel="noopener"
                 aria-label="查看照片：${escapeHTML(photo.caption)}">
-                <img src="${photo.src}"
+                <img
+                  src="${escapeHTML(photo.src)}"
                   alt="${escapeHTML(photo.caption)}"
                   loading="lazy">
               </a>
+
               <figcaption>${escapeHTML(photo.caption)}</figcaption>
+
               <div class="actions">
-                <button class="text-button" data-action="photo-caption"
-                  data-date="${date}" data-id="${photo.id}">
+                <button
+                  class="text-button"
+                  data-action="photo-caption"
+                  data-date="${date}"
+                  data-id="${escapeHTML(photo.id)}">
                   修改描述
                 </button>
-                <button class="text-button" data-action="delete-photo"
-                  data-date="${date}" data-id="${photo.id}">
+
+                <button
+                  class="text-button"
+                  data-action="delete-photo"
+                  data-date="${date}"
+                  data-id="${escapeHTML(photo.id)}">
                   刪除
                 </button>
               </div>
@@ -663,14 +922,15 @@ function dayDetails(date, includeTasks = false) {
         </div>
       ` : `
         <div class="empty">
-          <p>還沒有照片，今天有什麼值得記住？</p>
+          <p>還沒有照片，這一天有什麼值得記住？</p>
           <p>上傳一張照片，替生活留下一個畫面。</p>
         </div>
       `}
 
       <p class="help">
         支援 JPG、PNG、WebP；每張原圖上限 10 MB，每日最多 20 張。
-        上傳後會自動縮小，以節省儲存空間。每張照片均可修改文字描述。
+        上傳後會自動縮小，以節省儲存空間。
+        每張照片均可修改文字描述。
       </p>
     </section>
   `;
@@ -683,20 +943,23 @@ function dayDetails(date, includeTasks = false) {
 function tasksPage() {
   const openCount = data.tasks.filter(item => !item.done).length;
 
-  let items = data.tasks.filter(item => {
+  const items = sortedEntries(data.tasks.filter(item => {
     const matchesStatus =
       taskFilter === "all"
       || (taskFilter === "open" && !item.done)
       || (taskFilter === "done" && item.done);
 
-    const searchable = `${item.title} ${item.description} ${item.category}`;
+    const searchable = [
+      item.title,
+      item.description || "",
+      item.category || ""
+    ].join(" ");
+
     const matchesSearch = searchable.toLocaleLowerCase()
       .includes(taskSearch.toLocaleLowerCase());
 
     return matchesStatus && matchesSearch;
-  });
-
-  items = sortedEntries(items);
+  }));
 
   return `
     <div class="page-heading">
@@ -704,21 +967,35 @@ function tasksPage() {
         <h2>待辦事項</h2>
         <p>還有 ${openCount} 件事，等待你慢慢完成。</p>
       </div>
-      <button class="btn primary" data-action="new-task"
-        data-date="${todayKey()}">＋ 新增待辦</button>
+
+      <button
+        class="btn primary"
+        data-action="new-task"
+        data-date="${todayKey()}">
+        ＋ 新增待辦
+      </button>
     </div>
 
     <section class="panel">
       <form id="search-form" class="search-form" role="search">
-        <input type="search" name="query"
+        <input
+          type="search"
+          name="query"
           aria-label="搜尋待辦事項"
           placeholder="搜尋標題、描述或分類"
-          maxlength="100" value="${escapeHTML(taskSearch)}">
+          maxlength="100"
+          value="${escapeHTML(taskSearch)}">
+
         <button class="btn" type="submit">搜尋</button>
-        ${taskSearch
-          ? `<button class="btn" type="button"
-               data-action="clear-search">清除</button>`
-          : ""}
+
+        ${taskSearch ? `
+          <button
+            class="btn"
+            type="button"
+            data-action="clear-search">
+            清除
+          </button>
+        ` : ""}
       </form>
 
       <div class="filters" aria-label="待辦狀態篩選">
@@ -727,8 +1004,10 @@ function tasksPage() {
           ["open", "未完成"],
           ["done", "已完成"]
         ].map(([value, label]) => `
-          <button class="btn small ${taskFilter === value ? "active" : ""}"
-            data-action="task-filter" data-filter="${value}"
+          <button
+            class="btn small ${taskFilter === value ? "active" : ""}"
+            data-action="task-filter"
+            data-filter="${value}"
             aria-pressed="${taskFilter === value}">
             ${label}
           </button>
@@ -737,10 +1016,12 @@ function tasksPage() {
 
       ${items.length
         ? items.map(item => entryMarkup(item, "task")).join("")
-        : `<div class="empty">
+        : `
+          <div class="empty">
             <p>目前沒有符合條件的待辦事項。</p>
             <p>可以調整搜尋條件，或新增一項待辦。</p>
-           </div>`}
+          </div>
+        `}
     </section>
   `;
 }
@@ -763,13 +1044,17 @@ function settingsPage() {
         <h3>月曆與顯示</h3>
 
         <label class="check-label">
-          <input type="checkbox" name="mondayFirst"
+          <input
+            type="checkbox"
+            name="mondayFirst"
             ${data.preferences.mondayFirst ? "checked" : ""}>
           月曆以星期一作為每週開始
         </label>
 
         <label class="check-label">
-          <input type="checkbox" name="compact"
+          <input
+            type="checkbox"
+            name="compact"
             ${data.preferences.compact ? "checked" : ""}>
           使用較緊湊的列表與月曆間距
         </label>
@@ -785,16 +1070,23 @@ function settingsPage() {
 
         <div class="field">
           <label for="budget-limit">預算上限（HKD）</label>
-          <input id="budget-limit" name="budgetLimit"
-            type="number" min="0" max="1000000" step="0.01"
-            required value="${data.budget.limit}">
+          <input
+            id="budget-limit"
+            name="budgetLimit"
+            type="number"
+            min="0"
+            max="1000000"
+            step="0.01"
+            required
+            value="${escapeHTML(data.budget.limit)}">
         </div>
 
         <div class="table-wrap">
           <table class="budget-table">
             <caption>
-              選擇用品及數量後，JavaScript 會即時計算小計與總額。
+              選擇用品及數量後，會即時計算小計與總額。
             </caption>
+
             <thead>
               <tr>
                 <th scope="col">用品</th>
@@ -803,29 +1095,40 @@ function settingsPage() {
                 <th scope="col">小計</th>
               </tr>
             </thead>
+
             <tbody>
               ${data.budget.rows.map((row, index) => `
                 <tr>
                   <td>
-                    <select name="product-${index}"
+                    <select
+                      name="product-${index}"
                       data-budget-product="${index}"
                       aria-label="第 ${index + 1} 項用品">
                       ${PRODUCTS.map(product => `
-                        <option value="${product.id}"
+                        <option
+                          value="${product.id}"
                           ${product.id === row.product ? "selected" : ""}>
                           ${product.name}
                         </option>
                       `).join("")}
                     </select>
                   </td>
+
                   <td data-unit-price="${index}"></td>
+
                   <td>
-                    <input type="number" min="0" max="99" step="1"
-                      required name="quantity-${index}"
+                    <input
+                      type="number"
+                      min="0"
+                      max="99"
+                      step="1"
+                      required
+                      name="quantity-${index}"
                       data-budget-quantity="${index}"
                       aria-label="第 ${index + 1} 項數量"
-                      value="${row.quantity}">
+                      value="${escapeHTML(row.quantity)}">
                   </td>
+
                   <td data-line-total="${index}"></td>
                 </tr>
               `).join("")}
@@ -838,30 +1141,43 @@ function settingsPage() {
           <strong id="budget-total">HK$0.00</strong>
         </div>
 
-        <p id="budget-feedback" class="budget-feedback"
-          role="status" aria-live="polite"></p>
+        <p
+          id="budget-feedback"
+          class="budget-feedback"
+          role="status"
+          aria-live="polite">
+        </p>
 
         <p class="help">
-          此處為用品預算試算，價格是作業展示資料，沒有付款或下單功能。
+          此處為用品預算試算，價格是作業展示資料，
+          沒有付款或下單功能。
         </p>
       </section>
 
       <section class="panel">
         <h3>資料儲存</h3>
+
         <p class="muted">
-          名字、頭像、日程、待辦及照片儲存在目前瀏覽器的 IndexedDB。
+          名字、頭像、日程、待辦及照片儲存在目前瀏覽器。
           清除網站資料、更換瀏覽器或更換網址後，不會自動同步。
         </p>
-        <button type="button" class="btn" data-action="export-data">
+
+        <button
+          type="button"
+          class="btn"
+          data-action="export-data">
           下載資料備份
         </button>
+
         <p class="help">
           備份包含照片，格式為 JSON，方便保留資料及作業展示。
         </p>
       </section>
 
       <div class="form-footer">
-        <button class="btn primary" type="submit">儲存設定與預算</button>
+        <button class="btn primary" type="submit">
+          儲存設定與預算
+        </button>
       </div>
     </form>
   `;
@@ -869,31 +1185,36 @@ function settingsPage() {
 
 function readBudgetRows() {
   return data.budget.rows.map((_, index) => {
-    const product = document.querySelector(
+    const productInput = document.querySelector(
       `[data-budget-product="${index}"]`
-    ).value;
+    );
 
-    const rawQuantity = Number(document.querySelector(
+    const quantityInput = document.querySelector(
       `[data-budget-quantity="${index}"]`
-    ).value);
+    );
 
-    const quantity = Number.isFinite(rawQuantity)
-      ? Math.min(99, Math.max(0, Math.trunc(rawQuantity)))
-      : 0;
+    const rawQuantity = Number(quantityInput.value);
 
-    return { product, quantity };
+    return {
+      product: productInput.value,
+      quantity: Number.isFinite(rawQuantity)
+        ? Math.min(99, Math.max(0, Math.trunc(rawQuantity)))
+        : 0
+    };
   });
 }
 
 function updateBudgetPreview() {
-  if (!document.getElementById("budget-total")) return;
+  const totalElement = document.getElementById("budget-total");
+  if (!totalElement) return;
 
   const rows = readBudgetRows();
   let total = 0;
 
   rows.forEach((row, index) => {
-    const product = PRODUCTS.find(item => item.id === row.product)
-      || PRODUCTS[0];
+    const product = PRODUCTS.find(
+      item => item.id === row.product
+    ) || PRODUCTS[0];
 
     const subtotal = product.price * row.quantity;
     total += subtotal;
@@ -907,13 +1228,19 @@ function updateBudgetPreview() {
     ).textContent = money(subtotal);
   });
 
-  const rawLimit = Number(document.getElementById("budget-limit").value);
-  const limit = Number.isFinite(rawLimit) ? Math.max(0, rawLimit) : 0;
+  const rawLimit = Number(
+    document.getElementById("budget-limit").value
+  );
 
-  document.getElementById("budget-total").textContent = money(total);
+  const limit = Number.isFinite(rawLimit)
+    ? Math.max(0, rawLimit)
+    : 0;
+
+  totalElement.textContent = money(total);
 
   const feedback = document.getElementById("budget-feedback");
   feedback.classList.toggle("over", total > limit);
+
   feedback.textContent = total > limit
     ? `已超出預算 ${money(total - limit)}，可以調整用品或數量。`
     : `目前在預算之內，尚餘 ${money(limit - total)}。`;
@@ -924,8 +1251,10 @@ function updateBudgetPreview() {
 ========================= */
 
 function profilePage() {
-  const photoCount = Object.values(data.photos)
-    .reduce((sum, photos) => sum + photos.length, 0);
+  const photoCount = Object.values(data.photos).reduce(
+    (sum, photos) => sum + photos.length,
+    0
+  );
 
   return `
     <div class="page-heading">
@@ -938,30 +1267,49 @@ function profilePage() {
     <section class="panel">
       <div class="profile-header">
         ${avatarMarkup(true)}
+
         <div>
           <label class="btn" for="avatar-upload">更換頭像</label>
-          <input id="avatar-upload" type="file"
-            accept="image/jpeg,image/png,image/webp" hidden>
-          <p class="help">支援 JPG、PNG、WebP，原圖不超過 10 MB。</p>
+
+          <input
+            id="avatar-upload"
+            type="file"
+            accept="image/jpeg,image/png,image/webp"
+            hidden>
+
+          <p class="help">
+            支援 JPG、PNG、WebP，原圖不超過 10 MB。
+          </p>
         </div>
       </div>
 
       <form id="profile-form">
         <div class="field">
           <label for="profile-name">顯示名字</label>
-          <input id="profile-name" name="name" required
-            maxlength="24" autocomplete="nickname"
+
+          <input
+            id="profile-name"
+            name="name"
+            required
+            maxlength="24"
+            autocomplete="nickname"
             value="${escapeHTML(data.profile.name)}">
         </div>
 
         <div class="field">
           <label for="profile-bio">關於自己</label>
-          <textarea id="profile-bio" name="bio" maxlength="240"
+
+          <textarea
+            id="profile-bio"
+            name="bio"
+            maxlength="240"
             placeholder="寫一句介紹自己的話">${escapeHTML(data.profile.bio)}</textarea>
         </div>
 
         <div class="form-footer">
-          <button class="btn primary" type="submit">儲存個人資料</button>
+          <button class="btn primary" type="submit">
+            儲存個人資料
+          </button>
         </div>
       </form>
     </section>
@@ -975,10 +1323,14 @@ function profilePage() {
           <strong>${data.events.length}</strong>
           <span>累計行程</span>
         </div>
+
         <div>
-          <strong>${data.tasks.filter(item => item.done).length}</strong>
+          <strong>
+            ${data.tasks.filter(item => item.done).length}
+          </strong>
           <span>已完成待辦</span>
         </div>
+
         <div>
           <strong>${photoCount}</strong>
           <span>生活照片</span>
@@ -1006,43 +1358,74 @@ function openEntryDialog(kind, date = todayKey(), existing = null) {
   };
 
   dialog.innerHTML = `
-    <form id="entry-form" data-kind="${kind}"
-      data-id="${existing ? existing.id : ""}">
+    <form
+      id="entry-form"
+      data-kind="${kind}"
+      data-id="${existing ? escapeHTML(existing.id) : ""}">
+
       <div class="section-heading">
-        <h2 id="dialog-title">${existing ? "編輯" : "新增"}${label}</h2>
-        <button class="text-button" type="button"
-          data-action="close-dialog" aria-label="關閉視窗">關閉</button>
+        <h2 id="dialog-title">
+          ${existing ? "編輯" : "新增"}${label}
+        </h2>
+
+        <button
+          class="text-button"
+          type="button"
+          data-action="close-dialog"
+          aria-label="關閉視窗">
+          關閉
+        </button>
       </div>
 
       <div class="field">
         <label for="entry-title">${label}名稱</label>
-        <input id="entry-title" name="title"
-          required maxlength="80"
+
+        <input
+          id="entry-title"
+          name="title"
+          required
+          maxlength="80"
           placeholder="例如：完成網站首頁"
           value="${escapeHTML(item.title)}">
       </div>
 
       <div class="form-grid">
         <div class="field">
-          <label for="entry-date">${isTask ? "到期日期" : "日期"}</label>
-          <input id="entry-date" name="date" type="date"
-            min="1900-01-01" max="2100-12-31"
-            required value="${item.date}">
+          <label for="entry-date">
+            ${isTask ? "到期日期" : "日期"}
+          </label>
+
+          <input
+            id="entry-date"
+            name="date"
+            type="date"
+            min="1900-01-01"
+            max="2100-12-31"
+            required
+            value="${escapeHTML(item.date)}">
         </div>
 
         ${!isTask ? `
           <div class="field">
-            <label for="entry-time">時間（可留空作全天行程）</label>
-            <input id="entry-time" name="time" type="time"
-              value="${item.time || ""}">
+            <label for="entry-time">
+              時間（可留空作全天行程）
+            </label>
+
+            <input
+              id="entry-time"
+              name="time"
+              type="time"
+              value="${escapeHTML(item.time || "")}">
           </div>
         ` : ""}
 
         <div class="field full">
           <label for="entry-category">分類</label>
+
           <select id="entry-category" name="category">
             ${["生活", "學習", "工作", "健康"].map(category => `
-              <option value="${category}"
+              <option
+                value="${category}"
                 ${category === item.category ? "selected" : ""}>
                 ${category}
               </option>
@@ -1052,16 +1435,26 @@ function openEntryDialog(kind, date = todayKey(), existing = null) {
 
         <div class="field full">
           <label for="entry-description">事項內容</label>
-          <textarea id="entry-description" name="description"
+
+          <textarea
+            id="entry-description"
+            name="description"
             maxlength="2000"
             placeholder="寫下細節、準備事項或一些提醒……">${escapeHTML(item.description)}</textarea>
         </div>
       </div>
 
       <div class="form-footer">
-        <button type="button" class="btn"
-          data-action="close-dialog">取消</button>
-        <button type="submit" class="btn primary">儲存${label}</button>
+        <button
+          type="button"
+          class="btn"
+          data-action="close-dialog">
+          取消
+        </button>
+
+        <button type="submit" class="btn primary">
+          儲存${label}
+        </button>
       </div>
     </form>
   `;
@@ -1088,7 +1481,9 @@ function resizeImage(file, maxSize = 1400) {
     }
 
     if (file.size > 10 * 1024 * 1024) {
-      reject(new Error(`「${file.name}」超過 10 MB，請先縮小圖片。`));
+      reject(
+        new Error(`「${file.name}」超過 10 MB，請先縮小圖片。`)
+      );
       return;
     }
 
@@ -1099,17 +1494,31 @@ function resizeImage(file, maxSize = 1400) {
       try {
         const ratio = Math.min(
           1,
-          maxSize / Math.max(image.naturalWidth, image.naturalHeight)
+          maxSize / Math.max(
+            image.naturalWidth,
+            image.naturalHeight
+          )
         );
 
         const canvas = document.createElement("canvas");
-        canvas.width = Math.max(1, Math.round(image.naturalWidth * ratio));
-        canvas.height = Math.max(1, Math.round(image.naturalHeight * ratio));
+
+        canvas.width = Math.max(
+          1,
+          Math.round(image.naturalWidth * ratio)
+        );
+
+        canvas.height = Math.max(
+          1,
+          Math.round(image.naturalHeight * ratio)
+        );
 
         const context = canvas.getContext("2d");
-        if (!context) throw new Error("瀏覽器無法處理圖片。");
 
-        context.fillStyle = "#fffdf9";
+        if (!context) {
+          throw new Error("瀏覽器無法處理圖片。");
+        }
+
+        context.fillStyle = "#fffdfd";
         context.fillRect(0, 0, canvas.width, canvas.height);
         context.drawImage(image, 0, 0, canvas.width, canvas.height);
 
@@ -1123,7 +1532,10 @@ function resizeImage(file, maxSize = 1400) {
 
     image.onerror = () => {
       URL.revokeObjectURL(objectURL);
-      reject(new Error("無法讀取這張圖片，請選擇其他檔案。"));
+
+      reject(
+        new Error("無法讀取這張圖片，請選擇其他檔案。")
+      );
     };
 
     image.src = objectURL;
@@ -1133,11 +1545,10 @@ function resizeImage(file, maxSize = 1400) {
 async function uploadDailyPhotos(input) {
   const date = input.dataset.uploadDate;
   const files = Array.from(input.files || []);
+
   if (!files.length) return;
 
-  const currentCount = (data.photos[date] || []).length;
-
-  if (currentCount + files.length > 20) {
+  if ((data.photos[date] || []).length + files.length > 20) {
     toast("每日最多儲存 20 張照片，請減少選取數量。");
     input.value = "";
     return;
@@ -1149,7 +1560,6 @@ async function uploadDailyPhotos(input) {
   try {
     const photos = [];
 
-    // 逐張處理，減少同時解碼多張大圖造成的記憶體使用。
     for (const file of files) {
       photos.push({
         id: uid(),
@@ -1160,7 +1570,9 @@ async function uploadDailyPhotos(input) {
     }
 
     await updateData(() => {
-      if (!data.photos[date]) data.photos[date] = [];
+      if (!data.photos[date]) {
+        data.photos[date] = [];
+      }
 
       if (data.photos[date].length + photos.length > 20) {
         throw new Error("超過每日照片上限");
@@ -1182,7 +1594,7 @@ async function uploadDailyPhotos(input) {
 
 document.addEventListener("click", async event => {
   const button = event.target.closest("[data-action]");
-  if (!button) return;
+  if (!button || !data) return;
 
   const action = button.dataset.action;
   const id = button.dataset.id;
@@ -1190,14 +1602,35 @@ document.addEventListener("click", async event => {
   const date = button.dataset.date;
 
   switch (action) {
+    case "toggle-mobile-calendar":
+      mobileCalendarOpen = !mobileCalendarOpen;
+
+      document.body.classList.toggle(
+        "mobile-calendar-open",
+        mobileCalendarOpen
+      );
+
+      button.setAttribute(
+        "aria-expanded",
+        String(mobileCalendarOpen)
+      );
+
+      button.textContent = mobileCalendarOpen
+        ? "收起月曆"
+        : "展開月曆";
+
+      break;
+
     case "previous-month":
     case "next-month": {
       const offset = action === "previous-month" ? -1 : 1;
+
       shownMonth = new Date(
         shownMonth.getFullYear(),
         shownMonth.getMonth() + offset,
         1
       );
+
       selectedDate = dateKey(shownMonth);
       render();
       break;
@@ -1205,32 +1638,46 @@ document.addEventListener("click", async event => {
 
     case "calendar-today":
       selectedDate = todayKey();
+
       shownMonth = new Date(
         new Date().getFullYear(),
         new Date().getMonth(),
         1
       );
+
       render();
       break;
 
     case "select-date": {
+      if (!date || !validDate(date)) return;
+
       selectedDate = date;
       const selected = parseDate(date);
+
       shownMonth = new Date(
         selected.getFullYear(),
         selected.getMonth(),
         1
       );
+
+      // 手機從完整月曆選好日期後，自動收起月曆。
+      if (
+        button.closest("#home-calendar")
+        && window.matchMedia("(max-width: 780px)").matches
+      ) {
+        mobileCalendarOpen = false;
+      }
+
       render();
       break;
     }
 
     case "new-event":
-      openEntryDialog("event", date);
+      openEntryDialog("event", date || selectedDate);
       break;
 
     case "new-task":
-      openEntryDialog("task", date);
+      openEntryDialog("task", date || todayKey());
       break;
 
     case "close-dialog":
@@ -1238,9 +1685,16 @@ document.addEventListener("click", async event => {
       break;
 
     case "edit-entry": {
-      const collection = kind === "task" ? data.tasks : data.events;
+      const collection = kind === "task"
+        ? data.tasks
+        : data.events;
+
       const item = collection.find(entry => entry.id === id);
-      if (item) openEntryDialog(kind, item.date, item);
+
+      if (item) {
+        openEntryDialog(kind, item.date, item);
+      }
+
       break;
     }
 
@@ -1264,12 +1718,17 @@ document.addEventListener("click", async event => {
       break;
 
     case "photo-caption": {
-      const photo = (data.photos[date] || [])
-        .find(item => item.id === id);
+      const photo = (data.photos[date] || []).find(
+        item => item.id === id
+      );
 
       if (!photo) return;
 
-      const result = prompt("輸入照片描述（最多 100 字）", photo.caption);
+      const result = prompt(
+        "輸入照片描述（最多 100 字）",
+        photo.caption
+      );
+
       if (result === null) return;
 
       const caption = result.trim().slice(0, 100);
@@ -1282,14 +1741,16 @@ document.addEventListener("click", async event => {
       await updateData(() => {
         photo.caption = caption;
       }, "照片描述已更新");
+
       break;
     }
 
     case "delete-photo":
       if (confirm("確定刪除這張生活照片嗎？")) {
         await updateData(() => {
-          data.photos[date] = (data.photos[date] || [])
-            .filter(photo => photo.id !== id);
+          data.photos[date] = (data.photos[date] || []).filter(
+            photo => photo.id !== id
+          );
         }, "照片已刪除");
       }
       break;
@@ -1309,11 +1770,14 @@ document.addEventListener("click", async event => {
 
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
+
       link.href = url;
       link.download = `Dayline-backup-${todayKey()}.json`;
+
       document.body.appendChild(link);
       link.click();
       link.remove();
+
       setTimeout(() => URL.revokeObjectURL(url), 1000);
       toast("已建立資料備份");
       break;
@@ -1333,10 +1797,13 @@ document.addEventListener("submit", async event => {
     "profile-form",
     "settings-form",
     "search-form"
-  ].includes(form.id)) return;
+  ].includes(form.id)) {
+    return;
+  }
 
   event.preventDefault();
-  if (!form.reportValidity()) return;
+
+  if (!data || !form.reportValidity()) return;
 
   const fields = new FormData(form);
 
@@ -1364,8 +1831,9 @@ document.addEventListener("submit", async event => {
       ? "tasks"
       : "events";
 
-    const existing = data[collectionKey]
-      .find(item => item.id === form.dataset.id);
+    const existing = data[collectionKey].find(
+      item => item.id === form.dataset.id
+    );
 
     const item = {
       id: existing ? existing.id : uid(),
@@ -1373,14 +1841,18 @@ document.addEventListener("submit", async event => {
       date,
       time: String(fields.get("time") || ""),
       category: String(fields.get("category") || "生活"),
-      description: String(fields.get("description") || "").trim(),
+      description: String(
+        fields.get("description") || ""
+      ).trim(),
       done: existing ? existing.done : false
     };
 
     await updateData(() => {
       if (existing) {
-        const index = data[collectionKey]
-          .findIndex(entry => entry.id === existing.id);
+        const index = data[collectionKey].findIndex(
+          entry => entry.id === existing.id
+        );
+
         data[collectionKey][index] = item;
       } else {
         data[collectionKey].push(item);
@@ -1410,6 +1882,11 @@ document.addEventListener("submit", async event => {
     const rows = readBudgetRows();
     const limit = Number(fields.get("budgetLimit"));
 
+    if (!Number.isFinite(limit) || limit < 0) {
+      toast("請輸入有效的預算金額。");
+      return;
+    }
+
     await updateData(() => {
       data.preferences.mondayFirst = fields.has("mondayFirst");
       data.preferences.compact = fields.has("compact");
@@ -1423,25 +1900,36 @@ document.addEventListener("submit", async event => {
 ========================= */
 
 document.addEventListener("input", event => {
-  if (event.target.closest("#settings-form")) {
+  if (data && event.target.closest("#settings-form")) {
     updateBudgetPreview();
   }
 });
 
 document.addEventListener("change", async event => {
   const input = event.target;
+  if (!data) return;
 
   if (input.matches("[data-toggle]")) {
-    const key = input.dataset.toggle === "task" ? "tasks" : "events";
-    const item = data[key].find(entry => entry.id === input.dataset.id);
+    const key = input.dataset.toggle === "task"
+      ? "tasks"
+      : "events";
+
+    const item = data[key].find(
+      entry => entry.id === input.dataset.id
+    );
+
     if (!item) return;
 
     const checked = input.checked;
+
     const success = await updateData(() => {
       item.done = checked;
     }, checked ? "又完成一件事，做得好。" : "已標記為未完成");
 
-    if (!success) input.checked = !checked;
+    if (!success) {
+      input.checked = !checked;
+    }
+
     return;
   }
 
@@ -1459,20 +1947,29 @@ document.addEventListener("change", async event => {
     try {
       const avatar = await resizeImage(file, 500);
 
-      // 保留更換頭像前，使用者已在表單輸入但尚未提交的文字。
-      const draftName = document.getElementById("profile-name")?.value;
-      const draftBio = document.getElementById("profile-bio")?.value;
+      // 頭像儲存時保留尚未提交的姓名與簡介。
+      const draftName = document.getElementById(
+        "profile-name"
+      )?.value;
+
+      const draftBio = document.getElementById(
+        "profile-bio"
+      )?.value;
 
       const success = await updateData(() => {
         data.profile.avatar = avatar;
       }, "頭像已更新");
 
       if (success) {
-        if (draftName !== undefined) {
-          document.getElementById("profile-name").value = draftName;
+        const nameInput = document.getElementById("profile-name");
+        const bioInput = document.getElementById("profile-bio");
+
+        if (nameInput && draftName !== undefined) {
+          nameInput.value = draftName;
         }
-        if (draftBio !== undefined) {
-          document.getElementById("profile-bio").value = draftBio;
+
+        if (bioInput && draftBio !== undefined) {
+          bioInput.value = draftBio;
         }
       }
     } catch (error) {
@@ -1485,77 +1982,101 @@ document.addEventListener("change", async event => {
 });
 
 /* =========================
-   13. 啟動
+   13. 啟動及錯誤提示
 ========================= */
 
+function showStartupError(error, databaseError = false) {
+  console.error(error);
+
+  if (!app) return;
+
+  app.setAttribute("aria-busy", "false");
+
+  const heading = databaseError
+    ? "暫時無法開啟本機資料庫"
+    : "頁面暫時無法載入";
+
+  const description = databaseError
+    ? "請使用 Live Server 開啟網站，並允許瀏覽器儲存網站資料。"
+    : "請重新整理；如果仍然出現問題，可根據下方錯誤訊息檢查程式碼。";
+
+  app.innerHTML = `
+    <main class="panel" style="max-width:620px;margin:40px auto">
+      <p class="eyebrow">DAYLINE</p>
+      <h1>${heading}</h1>
+      <p>${description}</p>
+
+      <p class="help" style="overflow-wrap:anywhere">
+        錯誤訊息：
+        ${escapeHTML(error?.message || String(error))}
+      </p>
+
+      <button class="btn primary" id="retry-start">
+        重新嘗試
+      </button>
+    </main>
+  `;
+
+  document.getElementById("retry-start").addEventListener(
+    "click",
+    () => location.reload()
+  );
+}
+
 async function start() {
+  if (!app) {
+    console.error("HTML 中找不到 id=\"app\" 的元素。");
+    return;
+  }
+
   try {
     db = await openDatabase();
 
     const saved = await readData();
-    const defaults = initialData();
+    data = normalizeData(saved);
 
-    data = saved
-      ? {
-          ...defaults,
-          ...saved,
-          profile: {
-            ...defaults.profile,
-            ...saved.profile
-          },
-          preferences: {
-            ...defaults.preferences,
-            ...saved.preferences
-          }
-        }
-      : defaults;
-
-    if (!saved) await writeData();
-
-    render();
-
-    // 多個分頁同時開啟時，回到目前分頁會重新讀取已儲存資料。
-    window.addEventListener("focus", async () => {
-      if (saving || document.querySelector("dialog[open]")) return;
-
-      const active = document.activeElement;
-
-      // 避免覆蓋使用者正在編輯的表單或已修改的預算。
-      if (
-        ["profile", "settings"].includes(page)
-        || active?.matches("input, textarea, select")
-      ) return;
-
-      try {
-        const latest = await readData();
-        if (latest) {
-          data = latest;
-          render();
-        }
-      } catch (error) {
-        console.error(error);
-      }
-    });
+    if (!saved) {
+      await writeData();
+    }
   } catch (error) {
-    console.error(error);
-
-    app.setAttribute("aria-busy", "false");
-    app.innerHTML = `
-      <main class="panel" style="max-width:620px;margin:60px auto">
-        <p class="eyebrow">DAYLINE</p>
-        <h1>暫時無法開啟本機資料庫</h1>
-        <p>
-          請在 VS Code 使用 Live Server 開啟網站，
-          並允許瀏覽器儲存網站資料。
-          部分私密瀏覽模式可能限制本機儲存。
-        </p>
-        <button class="btn primary" id="retry-start">重新嘗試</button>
-      </main>
-    `;
-
-    document.getElementById("retry-start")
-      .addEventListener("click", () => location.reload());
+    showStartupError(error, true);
+    return;
   }
+
+  try {
+    render();
+  } catch (error) {
+    showStartupError(error);
+    return;
+  }
+
+  // 回到分頁時重新讀取資料，避免蓋掉正在編輯的表單。
+  window.addEventListener("focus", async () => {
+    if (saving || document.querySelector("dialog[open]")) {
+      return;
+    }
+
+    const active = document.activeElement;
+
+    if (
+      ["profile", "settings"].includes(page)
+      || active?.matches("input, textarea, select")
+    ) {
+      return;
+    }
+
+    try {
+      const latest = await readData();
+
+      if (latest) {
+        data = normalizeData(latest);
+        render();
+      }
+    } catch (error) {
+      console.error(error);
+      toast("重新讀取資料失敗，請稍後重新整理。");
+    }
+  });
 }
 
 start();
