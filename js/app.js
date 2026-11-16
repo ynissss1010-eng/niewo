@@ -1542,51 +1542,109 @@ function resizeImage(file, maxSize = 1400) {
   });
 }
 
-async function uploadDailyPhotos(input) {
+ async function uploadDailyPhotos(input) {
   const date = input.dataset.uploadDate;
   const files = Array.from(input.files || []);
 
   if (!files.length) return;
 
-  if ((data.photos[date] || []).length + files.length > 20) {
-    toast("每日最多儲存 20 張照片，請減少選取數量。");
+  if (!date || !validDate(date)) {
+    toast("無法確認照片日期，請重新選擇日期後再試。");
+    input.value = "";
+    return;
+  }
+
+  if (saving) {
+    toast("其他資料正在儲存，請稍後重新選擇照片。");
+    input.value = "";
+    return;
+  }
+
+  const existingPhotos = data.photos[date] || [];
+
+  if (existingPhotos.length + files.length > 20) {
+    toast(
+      `這一天已有 ${existingPhotos.length} 張照片，最多可儲存 20 張。`
+    );
+
     input.value = "";
     return;
   }
 
   input.disabled = true;
-  toast("正在處理照片……");
 
   try {
-    const photos = [];
+    const newPhotos = [];
 
-    for (const file of files) {
-      photos.push({
+    for (let index = 0; index < files.length; index++) {
+      const file = files[index];
+
+      // 備註可以留空；按取消則停止本次上傳。
+      const result = window.prompt(
+        `第 ${index + 1} / ${files.length} 張照片：${file.name}\n\n` +
+        "照片備註（選填，最多 100 字）\n" +
+        "例如：放學後和朋友一起喝咖啡。\n\n" +
+        "不填也可以，直接按「確定」。\n" +
+        "按「取消」會取消本次所有照片的上傳。",
+        ""
+      );
+
+      if (result === null) {
+        toast("已取消本次上傳，沒有新增照片。");
+        return;
+      }
+
+      const note = result.trim().slice(0, 100);
+
+      // 沒有填寫備註時，以檔名作為照片描述。
+      const defaultCaption =
+        file.name.replace(/\.[^.]+$/, "").slice(0, 100)
+        || "生活記錄";
+
+      toast(
+        `正在處理第 ${index + 1} / ${files.length} 張照片……`
+      );
+
+      const src = await resizeImage(file, 1400);
+
+      newPhotos.push({
         id: uid(),
-        src: await resizeImage(file),
-        caption: file.name.replace(/\.[^.]+$/, "").slice(0, 100)
-          || "生活記錄"
+        src,
+        caption: note || defaultCaption
       });
     }
 
-    await updateData(() => {
-      if (!data.photos[date]) {
-        data.photos[date] = [];
+    // 全部照片處理完成後，一次儲存。
+    const success = await updateData(() => {
+      const currentPhotos = data.photos[date] || [];
+
+      if (currentPhotos.length + newPhotos.length > 20) {
+        throw new Error("這一天的照片已超過 20 張上限。");
       }
 
-      if (data.photos[date].length + photos.length > 20) {
-        throw new Error("超過每日照片上限");
-      }
+      data.photos[date] = [
+        ...currentPhotos,
+        ...newPhotos
+      ];
+    }, `已新增 ${newPhotos.length} 張生活照片`);
 
-      data.photos[date].push(...photos);
-    }, `已儲存 ${photos.length} 張生活照片`);
+    if (!success) {
+      console.error("照片已處理，但未能儲存到資料庫。");
+    }
   } catch (error) {
-    toast(error.message || "照片上傳失敗，請重試。");
+    console.error("照片上傳失敗：", error);
+
+    toast(
+      error.message
+      || "照片處理失敗，請換一張 JPG 或 PNG 圖片再試。"
+    );
   } finally {
     input.disabled = false;
     input.value = "";
   }
 }
+
+
 
 /* =========================
    10. 按鈕事件
@@ -2023,9 +2081,13 @@ function showStartupError(error, databaseError = false) {
   );
 }
 
+  /* =========================
+   啟動網站
+========================= */
+
 async function start() {
   if (!app) {
-    console.error("HTML 中找不到 id=\"app\" 的元素。");
+    console.error('HTML 中找不到 id="app" 的元素。');
     return;
   }
 
@@ -2047,36 +2109,15 @@ async function start() {
     render();
   } catch (error) {
     showStartupError(error);
-    return;
   }
 
-  // 回到分頁時重新讀取資料，避免蓋掉正在編輯的表單。
-  window.addEventListener("focus", async () => {
-    if (saving || document.querySelector("dialog[open]")) {
-      return;
-    }
+  /*
+   此處不再監聽 window 的 focus 來重新渲染。
 
-    const active = document.activeElement;
-
-    if (
-      ["profile", "settings"].includes(page)
-      || active?.matches("input, textarea, select")
-    ) {
-      return;
-    }
-
-    try {
-      const latest = await readData();
-
-      if (latest) {
-        data = normalizeData(latest);
-        render();
-      }
-    } catch (error) {
-      console.error(error);
-      toast("重新讀取資料失敗，請稍後重新整理。");
-    }
-  });
+   手機選完照片返回網頁時，可能觸發 focus。
+   若此時重建頁面，上傳欄位可能被移除，
+   導致照片的 change 事件無法正常處理。
+  */
 }
 
 start();
